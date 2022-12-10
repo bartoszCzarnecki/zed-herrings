@@ -1,0 +1,314 @@
+---
+title: "Raport dotyczący wielkości śledzi oceanicznych"
+author: "Bartosz Czarnecki"
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+    toc: yes
+    toc_float: yes
+    number_sections: yes
+---
+
+
+# Podsumowanie
+Zastosowany regresor *random forest* wykazuje wystarczająco dobre wyniki (w oparciu o RMSE oraz R²), by stwierdzić, że możliwe jest przewidywanie długości śledzi w oparciu o dane zawarte w zbiorze.\
+Z uzyskanych wyników można wysunąć wniosek, że najważniejsze powody zmniejszania się średniej długości śledzi oceanicznych to zmiana temperatury przy powierzchni wody, natężenie połowów oraz roczny narybek.\
+Z drugiej strony nie można jednoznacznie stwierdzić, że te wyniki są poprawne. Różne modele regresji mają w zwyczaju wskazywać różne atrybuty jako najważniejsze, więc przy zastosowaniu innego modelu może się okazać, że wyniki są znacząco różne od uzyskanych.
+
+# Wykorzystane biblioteki
+Biblioteki wykorzystane w tym projekcie służą przede wszystkim do działania na zbiorze danych (np. dplyr, tidyr), wyświetlania danych (knitr) i wykresów (np. ggplot2, plotly) oraz do wykonywania regresji (caret).\
+Dodatkowo w tej sekcji znajduje się kod zapewniający powtarzalność wyników.
+```{r libraries_load, include=FALSE}
+library(Hmisc)
+library(tidyr)
+library(dplyr)
+library(knitr)
+library(ggcorrplot)
+library(plotly)
+library(ggplot2)
+library(caret)
+```
+
+```{r libraries_show, message=FALSE, warning=FALSE}
+names(sessionInfo()$other) %>%
+kable(col.names=NULL)
+
+set.seed(42)
+```
+
+# Opis danych
+Zbiór używany do analizy został pobrany ze strony przedmiotu. Zawiera on dane z ostatnich 60 lat dotyczące rozmiarów śledzi oraz warunków, w jakich żyją. 
+
+Zgodnie z opisem ze strony przedmiotu, Kolejne kolumny w zbiorze danych to:
+
+- length: długość złowionego śledzia [cm];
+- cfin1: dostępność planktonu [zagęszczenie Calanus finmarchicus gat. 1];
+- cfin2: dostępność planktonu [zagęszczenie Calanus finmarchicus gat. 2];
+- chel1: dostępność planktonu [zagęszczenie Calanus helgolandicus gat. 1];
+- chel2: dostępność planktonu [zagęszczenie Calanus helgolandicus gat. 2];
+- lcop1: dostępność planktonu [zagęszczenie widłonogów gat. 1];
+- lcop2: dostępność planktonu [zagęszczenie widłonogów gat. 2];
+- fbar: natężenie połowów w regionie [ułamek pozostawionego narybku];
+- recr: roczny narybek [liczba śledzi];
+- cumf: łączne roczne natężenie połowów w regionie [ułamek pozostawionego narybku];
+- totaln: łączna liczba ryb złowionych w ramach połowu [liczba śledzi];
+- sst: temperatura przy powierzchni wody [°C];
+- sal: poziom zasolenia wody [Knudsen ppt];
+- xmonth: miesiąc połowu [numer miesiąca];
+- nao: oscylacja północnoatlantycka [mb].
+
+Zbiór danych wczytano z pliku znajdującego się na dysku i zapisano w zmiennej 'herrings'.
+```{r reading_file, message=FALSE, warning=FALSE}
+classes <- c('integer', 'numeric', 'numeric', 'numeric', 'numeric', 'numeric', 'numeric', 'numeric', 'numeric', 'integer', 'numeric', 'numeric', 'numeric', 'numeric', 'integer', 'numeric')
+herrings <- as_tibble(read.csv(paste(getwd(), "sledzie.csv", sep='/'), colClasses = classes, na.strings="?"))
+```
+
+# Wartości puste
+Wartości puste zostały zastąpione wartościami poprzednimi, lub, jeśli to niemożliwe, następnymi.
+```{r na, message=FALSE, warning=FALSE}
+herrings <- fill(herrings, everything(), .direction='downup')
+```
+
+# Analiza zbioru danych
+Poniżej wyświetlono podstawowe informacje o danych oraz ich próbkę:
+```{r data_info1, message=FALSE, warning=FALSE, echo=FALSE}
+print(paste('Liczba kolumn:', ncol(herrings)))
+print(paste('Liczba wierszy:', nrow(herrings)))
+kable(head(herrings, 8))
+```
+Poniżej znajduje się tabela zawierająca informacje o wartości minimalnej, maksymalnej, średniej oraz odchyleniu standardowym danych z każdej kolumny.
+```{r data_info2, message=FALSE, warning=FALSE, echo=FALSE}
+
+select(herrings, -c(X, xmonth)) %>%
+  summarize(across(.cols= everything(), .fns=~min(.x, na.rm = TRUE))) -> h_min
+select(herrings, -c(X, xmonth)) %>%
+  summarize(across(.cols= everything(), .fns=~max(.x, na.rm = TRUE))) -> h_max
+select(herrings, -c(X, xmonth)) %>%
+  summarize(across(.cols= everything(), .fns=~mean(.x, na.rm = TRUE))) -> h_mean
+select(herrings, -c(X, xmonth)) %>%
+  summarize(across(.cols= everything(), .fns=~sd(.x, na.rm = TRUE))) %>%
+  bind_rows(h_mean, .) %>% 
+  bind_rows(h_max, .) %>% 
+  bind_rows(h_min, .) %>%
+  bind_cols(as_tibble(data.frame(xfunction=c('min', 'max', 'mean', 'sd'))), .) %>%
+  kable(caption='Min, max, średnia i odchylenie standardowe wartości w każdej kolumnie 
+        (poza liczbą porządkową i miesiącem połowu)', digits=3)
+```
+
+# Analiza wartości atrybutów
+Przedstawiono w formie tabeli jak liczne są dane przedziały wartości w każdej kolumnie.
+```{r density, message=FALSE, warning=FALSE, echo=FALSE}
+h1 <- herrings %>% 
+  mutate(length=cut(length, breaks=c(-Inf, 20, 22, 24, 26, 28, 30, Inf))) %>% 
+  group_by(length) %>% 
+  tally(name='length_n')
+h2 <- herrings %>% 
+  mutate(cfin1=cut(cfin1, breaks=c(-Inf, 0.1, 0.2, 0.5, 2, 4, 30, Inf))) %>% 
+  group_by(cfin1) %>% 
+  tally(name='cfin1_n')
+h3 <- herrings %>% 
+  mutate(cfin2=cut(cfin2, breaks=c(-Inf, 0.5, 1, 2, 5, 10, 18, Inf))) %>% 
+  group_by(cfin2) %>% 
+  tally(name='cfin2_n')
+h4 <- herrings %>% 
+  mutate(chel1=cut(chel1, breaks=c(-Inf, 6, 12, 18, 24, 30, 36, 42, 48, 56, 62, Inf))) %>% 
+  group_by(chel1) %>% 
+  tally(name='chel1_n')
+h5 <- herrings %>% 
+  mutate(chel2=cut(chel2, breaks=c(-Inf, 8, 16, 24, 32, 40, 48, 56, Inf))) %>% 
+  group_by(chel2) %>% 
+  tally(name='chel2_n')
+h6 <- herrings %>% 
+  mutate(lcop1=cut(lcop1, breaks=c(-Inf, 5, 10, 20, 40, 60, 80, 100, Inf))) %>% 
+  group_by(lcop1) %>% 
+  tally(name='lcop1_n')
+h7 <- herrings %>% 
+  mutate(lcop2=cut(lcop2, breaks=c(-Inf, 10, 20, 30, 40, 50, 60, Inf))) %>% 
+  group_by(lcop2) %>% 
+  tally(name='lcop2_n')
+h8 <- herrings %>% 
+  mutate(fbar=cut(fbar, breaks=c(-Inf, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, Inf))) %>% 
+  group_by(fbar) %>% 
+  tally(name='fbar_n')
+h9 <- herrings %>% 
+  mutate(recr=cut(recr, breaks=c(-Inf, 300000, 500000, 700000, 900000, 1100000, 1300000, 1500000, Inf))) %>% 
+  group_by(recr) %>% 
+  tally(name='recr_n')
+h10 <- herrings %>% 
+  mutate(cumf=cut(cumf, breaks=c(-Inf, 0.1, 0.14, 0.18, 0.23, 0.28, 0.32, 0.36, Inf))) %>% 
+  group_by(cumf) %>% 
+  tally(name='cumf_n')
+h11 <- herrings %>% 
+  mutate(totaln=cut(totaln, breaks=c(-Inf, 200000, 300000, 400000, 500000, 600000, 700000, 800000, Inf))) %>% 
+  group_by(totaln) %>% 
+  tally(name='totaln_n')
+h12 <- herrings %>% 
+  mutate(sst=cut(sst, breaks=c(-Inf, 13, 13.3, 13.5, 13.7, 13.9, 14.2, 14.5, Inf))) %>% 
+  group_by(sst) %>% 
+  tally(name='sst_n')
+h13 <- herrings %>% 
+  mutate(sal=cut(sal, breaks=c(-Inf, 35.4, 35.44, 35.48, 35.5, 35.52, 35.56, 35.6, Inf))) %>% 
+  group_by(sal) %>% 
+  tally(name='sal_n')
+h14 <- herrings %>% 
+  mutate(xmonth=cut(xmonth, breaks=c(-Inf, 3, 5, 6, 7, 8, 9, 10, Inf))) %>% 
+  group_by(xmonth) %>% 
+  tally(name='xmonth_n')
+h15 <- herrings %>% 
+  mutate(nao=cut(nao, breaks=c(-Inf, -4, -2.5, -1.1, 0, 1.1, 2.5, 4, Inf))) %>% 
+  group_by(nao) %>% 
+  tally(name='nao_n')
+
+kable(bind_cols(h1,h2,h3,h4,h5,h6,h7,h8), caption='Rozkład wartości w danych wejściowych', digits=3)
+kable(bind_cols(h9,h10,h11,h12,h13,h14,h15), caption='Rozkład wartości w danych wejściowych', digits=3)
+
+```
+
+# Korelacja między zmiennymi
+Zbadano korelację między zmiennymi i wyświetlono ją w postaci macierzy korelacji, gdzie intensywniejszy kolor oznacza większą korelację, czerwony negatywną a zielony pozytywną.
+```{r correlation, cache=TRUE, message=FALSE, warning=FALSE}
+herrings_cor <- herrings %>%
+  select(-X) %>% 
+  as.matrix() %>%
+  rcorr(type = 'spearman')
+correlation <- round(herrings_cor$r, 2)
+
+ggcorrplot(correlation, hc.order = TRUE, 
+           type = 'upper', 
+           lab = TRUE, 
+           lab_size = 3, 
+           method='circle',
+           title='Korelacja między zmiennymi',
+           colors=c('red', 'white', 'green'),
+           ggtheme=theme_bw)
+
+```
+
+# Wykres przedstawiający zmianę rozmiaru śledzia w czasie
+Utworzono interaktywny wykres prezentujący zmianę rozmiaru śledzia w czasie na podstawie losowo wybranych 150 wartości.
+```{r plotly, message=FALSE, warning=FALSE, echo=FALSE, cache=TRUE}
+accumulate_by <- function(dat, var) {
+  var <- lazyeval::f_eval(var, dat)
+  lvls <- plotly:::getLevels(var)
+  dats <- lapply(seq_along(lvls), function(x) {
+    cbind(dat[var %in% lvls[seq(1, x)], ], frame = lvls[[x]])
+  })
+  dplyr::bind_rows(dats)
+}
+
+df <- sample_n(herrings, 150) %>%
+  accumulate_by(~X)
+p <- ggplot(df,aes(X, length, frame = frame)) +
+  geom_line()
+
+fig <- ggplotly(p) %>%
+  layout(
+    title = "Zmiana rozmiaru śledzi w czasie",
+    yaxis = list(
+      title = "Rozmiar",
+      zeroline = F,
+      tickprefix = "$"
+    ),
+    xaxis = list(
+      title = "Czas",
+      zeroline = F, 
+      showgrid = F
+    )
+  ) %>% 
+  animation_opts(
+    frame = 100, 
+    transition = 0, 
+    redraw = FALSE
+  ) %>%
+  animation_slider(
+    currentvalue = list(
+      prefix = "Czas"
+    )
+  )
+
+fig
+```
+
+# Regresja
+W tej sekcji przygotowane zostały 2 modele regresora, których zadaniem jest przewidywanie rozmiaru śledzia w oparciu o pozostałe dane w zbiorze (atrybuty).
+W oparciu o korelację atrybutów z długością śledzi zostało wybrane 7 o największej (najdalszej od zera, ujemnej bądź dodatniej) korelacji.
+
+## Przygotowanie danych
+Zbiór danych został podzielony na 3 zbiory: uczący, testowy i walidujący. Zbiory uczący i testowy zostały wykorzystane do zmian parametrów modeli oraz wybrania najskuteczniejszego. Zbiór walidujący został użyty jako ostateczny test końcowo wybranego modelu.
+```{r prepare_data, cache=TRUE, message=FALSE, warning=FALSE}
+splitIndex <- createDataPartition(herrings$length, p = 0.8, list = FALSE)
+splitIndex2 <- createDataPartition(herrings$length, p = 0.9, list = FALSE)
+trainData <- herrings[splitIndex, ]
+testData <- herrings[setdiff(splitIndex2, splitIndex), ]
+validData <- herrings[-splitIndex2, ]
+
+```
+
+## Regresja liniowa
+Prostszym z testowanych modeli jest regresja liniowa. Model został utworzony tak jak jest to widoczne w poniższym fragmencie kodu.
+```{r regressor_lm, cache=TRUE, message=FALSE, warning=FALSE}
+model <- train(length ~ cumf+fbar+nao+recr+chel2+lcop2+sst+lcop1,
+               data = trainData,
+               method = "lm")
+
+predictions <- predict(model, testData)
+performance <- postResample(predictions, testData$length)
+
+```
+
+Następnie została zbadana skuteczność modelu. W formie wykresu przedstawiono jakie długości (uśrednione) przewidywał model dla danych realnych długości.
+```{r stats_lm, message=FALSE, warning=FALSE, echo=FALSE}
+print(performance)
+predictions2 <- bind_cols(testData$length, predictions)
+colnames(predictions2) <- c('faktyczna', 'przewidywana')
+predictions2_arranged <- arrange(predictions2, faktyczna)
+ggplot(predictions2_arranged) + 
+  geom_point(aes(as.numeric(row.names(predictions2_arranged)), faktyczna, color='#0f0ff0')) +
+  #geom_point(aes(as.numeric(row.names(predictions2_arranged)), przewidywana, color='#f00f0f')) +
+  geom_smooth(aes(as.numeric(row.names(predictions2_arranged)), przewidywana, color='#f00f0f')) +
+  scale_color_manual(name='', values=c('#0f0ff0'='#0f0ff0', '#f00f0f'='#f00f0f'), labels=c('długość faktyczna','długość przewidywana')) + 
+  xlab('') + ylab('długość śledzia [cm]')
+
+```
+
+## Regresja *random forest*
+Drugim testowanym modelem jest model *random forest* zawierający 15 drzew. Model został utworzony tak jak jest to widoczne na poniższym fragmencie kodu.
+```{r regressor_rf, cache=TRUE, message=FALSE, warning=FALSE}
+model <- train(length ~ cumf+fbar+nao+recr+chel2+lcop2+sst,
+               data = trainData,
+               method = "rf",
+               tuneLength=15,
+               ntree=15)
+
+predictions <- predict(model, testData)
+performance <- postResample(predictions, testData$length)
+
+```
+
+Efektywność modelu zbadana na zbiorze testowym wygląda następująco:
+```{r test_rf, message=FALSE, warning=FALSE, echo=FALSE}
+print(performance)
+```
+
+Następnie została zbadana skuteczność modelu. W formie wykresu przedstawiono jakie długości (uśrednione) przewidywał model dla danych realnych długości.
+```{r stats_rf, message=FALSE, warning=FALSE, echo=FALSE}
+predictions <- predict(model, validData)
+performance <- postResample(predictions, validData$length)
+print(performance)
+predictions2 <- bind_cols(validData$length, predictions)
+colnames(predictions2) <- c('faktyczna', 'przewidywana')
+predictions2_arranged <- arrange(predictions2, faktyczna)
+ggplot(predictions2_arranged) + 
+  geom_point(aes(as.numeric(row.names(predictions2_arranged)), faktyczna, color='#0f0ff0')) +
+  #geom_point(aes(as.numeric(row.names(predictions2_arranged)), przewidywana, color='#f00f0f')) +
+  geom_smooth(aes(as.numeric(row.names(predictions2_arranged)), przewidywana, color='#f00f0f')) +
+  scale_color_manual(name='', values=c('#0f0ff0'='#0f0ff0', '#f00f0f'='#f00f0f'), labels=c('długość faktyczna','długość przewidywana')) + 
+  xlab('') + ylab('długość śledzia [cm]')
+```
+
+## Analiza ważności atrybutów
+Model oparty o *random forest* okazał się być skuteczniejszy. Wyświetlono ważność atrybutów, jaka została dzięki niemu odkryta.
+```{r importance, message=FALSE, warning=FALSE}
+print(varImp(model))
+```
+W oparciu o uzyskane dane można stwierdzić, że najważniejszym powodem zmniejszania się długości śledzi oceanicznych jest zmiana temperatury przy powierzchni wody. Biorąc pod uwagę zbadaną wcześniej korelację można stwierdzić, że niższe temperatury negatywnie wpływają na rozmiary śledzi. Inne istotne atrybuty to ułamek pozostawionego narybku przy połowach oraz roczny narybek. 
