@@ -1,3 +1,3 @@
 # ZED Herrings
 ## website
-todo
+https://bartoszczarnecki.github.io/zed-herrings/
